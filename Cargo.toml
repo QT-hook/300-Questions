@@ -1,0 +1,21 @@
+[package]
+name = "dioxus-app"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+dioxus = { version = "0.7.10", features = ["desktop"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+rand = "0.9.5"
+socket2 = { version = "0.6.4", features = ["all"] }
+sha2 = "0.10.9"
+tokio = { version = "1.54.1", features = ["time"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+lto = "thin"
+strip = true
