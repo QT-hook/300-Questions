@@ -1,0 +1,14 @@
+# Keep checkout line endings stable; protocol fingerprints also canonicalize JSON.
+* text=auto
+*.rs text eol=lf
+*.toml text eol=lf
+Cargo.lock text eol=lf
+*.json text eol=lf
+*.css text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+*.ps1 text eol=lf
+.gitattributes text eol=lf

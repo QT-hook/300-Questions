@@ -30,7 +30,15 @@ jobs:
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --check
-      - name: Portable unit tests
+      - name: Print version, protocol and canonical question fingerprint
+        run: cargo run --locked -- --diagnostics
+      - name: Canonical fingerprint regression tests
+        run: cargo test --locked questions::tests -- --nocapture
+      - name: Deterministic unicast discovery regression tests
+        run: cargo test --locked room::discovery::tests -- --nocapture
+      - name: TCP endpoint correction regression tests
+        run: cargo test --locked room::service::tests::endpoint_ -- --nocapture
+      - name: Portable and deterministic socket tests (skip only legacy LAN suite)
         run: cargo test --locked -- --skip room::network_tests
       - name: LAN integration tests (explicitly skipped in CI)
         run: Write-Output 'SKIPPED room::network_tests (real sockets, discovery and timing). Run cargo test --locked room::network_tests -- --test-threads=1 on a suitable local network; CI is not GUI or cross-device acceptance.'
@@ -63,7 +71,15 @@ jobs:
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --check
-      - name: Portable unit tests
+      - name: Print version, protocol and canonical question fingerprint
+        run: cargo run --locked -- --diagnostics
+      - name: Canonical fingerprint regression tests
+        run: cargo test --locked questions::tests -- --nocapture
+      - name: Deterministic unicast discovery regression tests
+        run: cargo test --locked room::discovery::tests -- --nocapture
+      - name: TCP endpoint correction regression tests
+        run: cargo test --locked room::service::tests::endpoint_ -- --nocapture
+      - name: Portable and deterministic socket tests (skip only legacy LAN suite)
         run: cargo test --locked -- --skip room::network_tests
       - name: LAN integration tests (explicitly skipped in CI)
         run: printf '%s\n' 'SKIPPED room::network_tests (real sockets, discovery and timing). Run cargo test --locked room::network_tests -- --test-threads=1 on a suitable local network; CI is not GUI or cross-device acceptance.'
@@ -139,8 +155,10 @@ jobs:
           - Windows：完整解压 ZIP 后运行 dioxus-app.exe；需要 Microsoft Edge WebView2 Evergreen Runtime x64，缺少 VCRUNTIME/MSVCP 时安装 Visual C++ Redistributable x64。
           - Linux：Ubuntu 24.04 x86_64 / glibc 2.39 构建基线，需兼容的 GTK 3、WebKitGTK 4.1、libxdo、OpenSSL、Ayatana AppIndicator、librsvg 运行库及图形桌面；不是自包含包或 AppImage。外部链接需要 xdg-utils，中文字体建议 fonts-noto-cjk。详见包内中文运行说明。
           - 两个平台均内嵌题库和样式。请先核对压缩包旁的 SHA-256，再解压并核对包内 SHA256SUMS.txt；校验和不等于发布者签名。程序未签名，系统可能提示未知发布者，不要关闭系统安全保护。
-          - 局域网功能仅用于可信网络，无 TLS 或身份认证；需要 TCP 入站与 UDP 42739，程序不会自动修改防火墙。
-          - CI 仅验证格式、可移植测试与构建。真实套接字/发现/时序相关 room::network_tests 在 CI 明确跳过；GUI、动画、系统浏览器打开链接和跨机器局域网尚需实机验收。
+          - v0.1.1 使用协议 2 与 canonical 题库 SHA-256，排除 JSON 外层 LF/CRLF、排版和等价转义差异；所有参与者必须一起升级，不可与 v0.1.0 混用。诊断可核对应用版本、协议及题库指纹。
+          - 发现使用临时 UDP 搜索端口、独立 UDP 42739 响应监听及逐网卡定向广播；组播是可降级辅助路径，失败不关闭单播/广播。固定监听失败仍可搜索，房间可尝试手动连接。
+          - 局域网仅用于可信网络，无 TLS 或身份认证；需允许程序实际动态 TCP 监听端口及 UDP 发现/回复流量，不要求固定 TCP 42739。手动连接使用房主显示的实际 IP:端口；程序不会自动修改或关闭防火墙。
+          - CI 验证格式、canonical 指纹、确定性单播发现/端点回归与构建，仅旧 room::network_tests 广播/时序套件明确跳过。真实 Windows 设备、Wi-Fi、VPN/多网卡、GUI、动画和系统浏览器链接仍需实机验收，不能用环回测试替代。
           NOTES
           gh release create "$RELEASE_TAG" --verify-tag --draft --title "$RELEASE_TAG" --notes-file release-notes.txt
           gh release upload "$RELEASE_TAG" \

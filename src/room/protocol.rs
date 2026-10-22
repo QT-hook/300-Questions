@@ -1,7 +1,37 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::io::{self, Read, Write};
 
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
+
+pub fn compatibility_error(
+    version: u32,
+    app: &str,
+    hash: &str,
+    local_hash: &str,
+) -> Option<String> {
+    let details = format!(
+        "本机 v{} / 协议 {} / 题库 {}；对方 v{} / 协议 {} / 题库 {}",
+        env!("CARGO_PKG_VERSION"),
+        VERSION,
+        short_hash(local_hash),
+        app,
+        version,
+        short_hash(hash)
+    );
+    if version != VERSION {
+        Some(format!(
+            "协议版本不一致：{details}。请所有参与者一起升级到 v0.1.1 或更新的相同版本"
+        ))
+    } else if hash != local_hash {
+        Some(format!("题库指纹不一致：{details}。请使用相同题库的发布包"))
+    } else {
+        None
+    }
+}
+
+pub fn short_hash(hash: &str) -> String {
+    hash.chars().take(12).collect()
+}
 pub const MAX_FRAME: usize = 65536;
 pub const MAX_SNAPSHOT: usize = 4 * 1024 * 1024;
 

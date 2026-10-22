@@ -15,12 +15,20 @@ Rust 2024 / Dioxus 0.7.10 桌面应用。默认黑暗主题、固定范围模式
 - 定时任务属于练习组件作用域；退出和重开显式取消任务，状态推进额外检查会话代号、题序与阶段。异步等待不持有 signal guard。减少动态效果时停用位移动画，但保留反馈阅读时间；推进不依赖 animationend。
 - 单人练习状态只在内存中，与联网房间独立。
 
+## v0.1.1 兼容修复（协议 2）
+
+- **所有参与者必须一起升级到 v0.1.1 / 协议 2**，不要混用 v0.1.0。协议不符与题库不符分别提示；先比较诊断中的应用版本、协议和题库指纹。此说明不代表新版本已发布，不修改旧版标签或资产。
+- 题库 SHA-256 改为严格解析后按固定结构序列化的 canonical 指纹，不再哈希原始 JSON 文件字节。LF/CRLF、缩进、对象键顺序及等价 Unicode 转义不影响指纹；题序、重复题、选项顺序和字符串内部空白/换行原样保留，内容变化仍改变指纹。非法题库返回错误，不用空库指纹兜底。`.gitattributes` 固定源码/JSON 等文本的 LF，属于额外防御，不是兼容性的唯一保障。
+- 在源码目录执行 `cargo run --locked -- --diagnostics`，或在终端执行 `dioxus-app --diagnostics`（Windows 为 `./dioxus-app.exe --diagnostics`），可不启动 GUI 输出应用版本、协议和完整题库指纹。Windows 无控制台发行程序的终端输出可能不可见，可查看加入区展开诊断，或使用源码命令/CI 日志核对。
+
 ## 局域网房间（当前实现与边界）
 
 - 创建需要名字（去首尾空白后 1～9 字符）、房间名称（2～6 字符）和四位 ASCII 数字代码。加入先搜索，列表按真实房间 ID 区分；同号房间由用户显式选择。可手动填写房主界面显示的 `IP:端口`。
 - 等待室由房主选择固定范围/随机数量，以及「同题同步」或「各自进度」；在线成员准备后开始。题序只生成一次并复制，A～D 不重排。开始后拒绝新的成员；现有内存会话成员可断线自动重连。
 - 同步模式等所有在线成员回答再揭晓约两秒后推进；失联约 1.8 秒后不再阻塞。独立模式按本人进度，正确约400ms、错误约2秒，再经过平移动画。成绩表实时列出全部成员，完成与在线独立，已完成离开保留，未完成离开明确标记。
-- 不需要中心服务器。UDP IPv4 广播及组播 `239.255.42.39:42739` 发现，四秒过期；TCP 监听系统分配端口，成员间维持连接、约300ms交换副本并检测失联。发现失败不影响手动 IP。防火墙需要允许该 UDP 端口及程序的 TCP 入站；本项目不自动修改防火墙。多网卡可能选错地址，可使用正确网卡 IP 手动连接；校园网客户端隔离可能禁止通信。
+- 不需要中心服务器。UDP 发现使用独立持久的系统分配临时端口（端口 0 绑定）发探测，回复发回探测实际源地址；固定 UDP `42739` 监听只负责响应，监听失败不阻止本机搜索，但会提示本机房间可能无法被发现，仍可手动连接。房间四秒过期。搜索覆盖 limited broadcast、loopback 及各有效 IPv4 网卡的定向广播；`239.255.42.39:42739` 组播是可降级的辅助路径，监听尝试按网卡加入，失败仅保留诊断，不连带关闭单播/广播。初始化重试与网卡刷新约每五秒进行，不扫描逐个主机 IP。
+- **TCP 使用系统分配的动态监听端口，不是固定 TCP 42739**。手动连接必须填写房主界面显示的实际 `IP:端口`，不要把 UDP 发现端口当 TCP 端口。成员间约300ms交换副本并检测失联；握手按真实连接来源/本地地址修正网卡 IP，同时保留对方声明的监听端口，绝不使用 TCP 临时源端口替代。单个端点仍不能覆盖所有 VPN/多网卡路由拓扑，可用正确 LAN 网卡 IP 加实际监听端口重试。
+- 防火墙由用户确认：仅在可信专用网络允许应用的 TCP 入站（实际动态监听端口）及 UDP 42739 发现与探测回复流量；不要一概要求开放固定 TCP 42739。程序不自动新增规则、不自动修改或关闭防火墙。校园网/AP 客户端隔离、VPN 路由和多网卡策略可能禁止通信；发现失败不影响允许 TCP 通信时的手动连接。
 - 长度前缀 JSON 每帧最多64KiB；逻辑消息分块、总量最多4MiB，收全才应用。队列有界，最多32成员/32入站连接，握手/空闲读取1.5秒、TCP连接100ms、交换读写200ms超时。相同题库 SHA-256 和协议版本校验。仅用于可信局域网：目前没有 TLS、身份认证、恢复令牌或恶意同网段攻击防护，四位代码不是密码。
 - 每个成员创建服务时已有独立监听端口。房主失联后，互通成员按 ID 确定性排序选接替者，增加代次；仅剩一人也继续。正常离开尽力发送副本及接替选择；窗口释放根服务也走尽力离开。网络分区优先可用，不是多数共识。重新连通时按代次及固定优先级统一协调者，合并不可变答案账本；冲突保留本地首次记录并提示，进度分歧取较大题序并提示。不能承诺分区时全局同题或零数据丢失。
 - 答案以成员/题序幂等去重，各端根据题库重新计算成绩，不接受对方提供分数。本人待重传提交只在看到其他设备实际副本含该提交后移除；单人时不伪称远端备份。房间及待提交原子写入本地：Windows 为 `%LOCALAPPDATA%\dioxus-app\`（缺失时尝试 `%USERPROFILE%\AppData\Local\dioxus-app\`），其他平台为 `$XDG_DATA_HOME/dioxus-app/`，未设置时为 `~/.local/share/dioxus-app/`；上述环境变量均不可用时回退临时目录。文件按本次服务身份命名。保存先同步文件再替换，Unix 另同步目录，Windows 不提供相同的目录同步保证。保存只保证本机实际收到的信息。
@@ -83,13 +91,22 @@ cargo clippy --offline --locked --all-targets --all-features -- -D warnings
 
 ### 发布流程
 
-`.github/workflows/release.yml` 仅由 `v*` 标签 push 或 `workflow_dispatch` 触发。手动选择分支仅构建、不发布；只有 `refs/tags/v*` 才运行发布 job。发布前由维护者检查版本与标签不存在，再将新标签推送到已确认的提交（例如 `v0.1.0`），不要 force 或复用标签。
+`.github/workflows/release.yml` 仅由 `v*` 标签 push 或 `workflow_dispatch` 触发。手动选择分支仅构建、不发布；只有 `refs/tags/v*` 才运行发布 job。发布前由维护者检查版本与标签不存在，再将新标签推送到已确认的提交（本次目标为 `v0.1.1`，须另获发布授权后执行），不要 force 或复用标签。
 
 两个 build job 仅有 `contents: read`：Windows 稳定 Rust / MSVC x64 复用 `scripts/package-windows.ps1`；Linux 固定 `ubuntu-24.04`、安装原生开发库，构建 `x86_64-unknown-linux-gnu`，调用 `scripts/package-linux.sh`。均先 fmt 和 locked 可移植测试，再 locked release 构建，各上传精确命名的 artifact。
 
 发布 job 等两平台成功才执行，独有 `contents: write`，使用内置 `secrets.GITHUB_TOKEN`，无需另设 PAT。只下载本次运行的两个指定 artifact，严格检查两个包及两个校验文件（总计四个非空文件），验证 SHA-256 后创建 **draft**，全部上传成功才公开。按标签串行，不覆盖已存在的 Release（包括 draft），不用 `--clobber`；上传失败保留草稿供维护者检查，不自动删除或重建已有发行版。
 
-CI 明确跳过真实套接字/发现/时序相关 `room::network_tests`，可移植测试失败会使流程失败。适合的本地网络上执行 `cargo test --locked room::network_tests -- --test-threads=1`。`target/` 和 `dist/` 保持忽略。
+CI 只跳过原有广播/时序 LAN 集成测试 `room::network_tests`，不跳过所有联网测试：Windows/Linux 均显式运行 `cargo test --locked questions::tests -- --nocapture`、`cargo test --locked room::discovery::tests -- --nocapture` 和 `cargo test --locked room::service::tests::endpoint_ -- --nocapture`，随后运行 `cargo test --locked -- --skip room::network_tests`。新增确定性单播真实 socket 测试不依赖广播或组播权限，失败会使 CI 失败；诊断命令在构建日志打印版本、协议与完整 canonical 指纹，两平台应一致。适合的本地网络上另执行 `cargo test --locked room::network_tests -- --test-threads=1`。`target/` 和 `dist/` 保持忽略。
+
+### 实机复测（尚未验收）
+
+1. 所有设备升级同版 v0.1.1；在加入区诊断或 `--diagnostics` 核对协议 2 与完整指纹一致，不一致先停止联机并核查程序/题库来源。
+2. 在可信专用 Wi-Fi/LAN 上分别验证 Windows↔Windows 和 Windows↔Linux：创建、搜索、两台同时搜索、加入、开始与成绩同步。记录诊断错误，不关闭安全保护。
+3. 如发现失败，使用房主正确 LAN IP 与界面显示的实际动态 TCP 端口手动加入；检查应用防火墙权限及 AP 隔离。单独验证固定 UDP 监听被占用时仍能搜索，组播不可用时仍可单播/广播。
+4. 分别在 VPN 开/关、多网卡切换、房主离开/停止后验证重连与接替，记录具体路由与结果。
+
+**本次没有完成真实 Windows 设备、跨设备 Wi-Fi、VPN/多网卡环境的人工验证**。本地 Linux 环回/单播测试和 CI 工作流配置不能替代这些验收；Windows CI 未实际成功运行前，也不能声称跨平台 CI 已通过。
 
 ### Windows 单平台开发构建（保留原流程）
 
@@ -99,7 +116,7 @@ CI 明确跳过真实套接字/发现/时序相关 `room::network_tests`，可�
 - 成功后在该次运行的 **Artifacts** 下载 `300-Questions-windows-x64`（GitHub 可能要求登录）。解压 GitHub 的 artifact 外层包，得到 `300-Questions-windows-x64.zip` 与 `.zip.sha256`；用 `Get-FileHash .\300-Questions-windows-x64.zip -Algorithm SHA256` 核对 ZIP，再完整解压内层 ZIP。内含 `dioxus-app.exe`、中文 `运行说明.txt` 和 exe 的 `SHA256SUMS.txt`。校验和不等于数字签名。
 - Windows 需要 **Microsoft Edge WebView2 Evergreen Runtime x64**；缺失时从 [微软官网](https://developer.microsoft.com/microsoft-edge/webview2/) 安装。如提示缺少 VCRUNTIME/MSVCP DLL，安装 [Visual C++ Redistributable x64](https://aka.ms/vs/17/release/vc_redist.x64.exe)。程序无代码签名，SmartScreen 可能警告未知发布者；核实来源后自行决定，不要关闭系统安全保护。发行版不弹出控制台窗口。
 - ZIP 只打包 exe、说明与校验和，不含源 Excel、源码、缓存、外置题库或样式。不自动创建公共 Release，不需仓库秘密，workflow 权限仅 `contents: read`。`target/` 和 `dist/` 保持忽略。
-- CI 执行 `cargo test --locked -- --skip room::network_tests`；另一步明确说明跳过真实套接字/发现/时序相关的 LAN 集成测试，因为它们不适合作为稳定 CI 验收。没有静默忽略可移植测试失败。本地合适网络上可单独执行 `cargo test --locked room::network_tests -- --test-threads=1`。Windows GUI、WebView2 启动、动画和跨设备局域网仍须实机验证，构建成功不代表这些已验收。
+- CI 显式运行 canonical 指纹、确定性单播发现和 TCP 端点修正回归，再执行 `cargo test --locked -- --skip room::network_tests`，仅保留旧 LAN 广播/时序集成测试的显式跳过；新增确定性 socket 测试必须运行，任何失败均不静默忽略。版本/协议/完整指纹通过 `--diagnostics` 输出。本地合适网络上另执行 `cargo test --locked room::network_tests -- --test-threads=1`。Windows GUI、WebView2 启动、动画、真实 Wi-Fi 和 VPN/多网卡仍须实机验证，构建成功不代表这些已验收。
 
 Windows 开发机可安装稳定 Rust 与 Visual Studio C++ Build Tools 后，在项目目录用 PowerShell 7 执行：
 

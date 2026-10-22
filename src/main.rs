@@ -217,6 +217,20 @@ mod tests {
 }
 
 fn main() {
+    if std::env::args().any(|arg| arg == "--diagnostics") {
+        match questions::embedded_fingerprint() {
+            Ok(hash) => println!(
+                "dioxus-app {} protocol={} fingerprint={hash}",
+                env!("CARGO_PKG_VERSION"),
+                room::protocol::VERSION
+            ),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let window = WindowBuilder::new()
         .with_title("Dioxus")
         .with_inner_size(LogicalSize::new(960.0, 720.0))
@@ -233,6 +247,7 @@ fn App() -> Element {
     let mut room = use_signal(|| None::<Room>);
     let mut adverts = use_signal(Vec::<Advert>::new);
     let mut status = use_signal(String::new);
+    let mut diagnostics = use_signal(Vec::<String>::new);
     let mut network_error = use_signal(|| None::<String>);
     let mut manual_endpoint = use_signal(String::new);
     let creator_name = use_signal(String::new);
@@ -248,6 +263,7 @@ fn App() -> Element {
                 for event in service.poll() {
                     match event {
                         Event::Rooms(found) => adverts.set(found),
+                        Event::Diagnostics(messages) => diagnostics.set(messages),
                         Event::State(state) => {
                             room.set(Some(*state));
                             network_error.set(None);
@@ -452,6 +468,11 @@ fn App() -> Element {
                                 let result = discover_service.as_ref().map_err(Clone::clone).and_then(|service| service.command(Command::Discover { code: join_code() }));
                                 network_error.set(result.err());
                             }, "搜索房间" }
+                            details {
+                                summary { "网络诊断（版本 / 协议 / 题库 / 地址）" }
+                                for message in diagnostics() { p { "{message}" } }
+                                p { "Windows 请检查专用网络防火墙：UDP 42739 和下方显示的 TCP 监听端口；不会自动修改防火墙。多网卡/VPN可能需要手动 IP。" }
+                            }
                             p { class: "field-label", "搜索后请选择房间；相同房间号不会自动加入。" }
                             for advert in adverts() {
                                 {

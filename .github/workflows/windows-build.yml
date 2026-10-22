@@ -22,7 +22,15 @@ jobs:
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --check
-      - name: Portable unit tests
+      - name: Print version, protocol and canonical question fingerprint
+        run: cargo run --locked -- --diagnostics
+      - name: Canonical fingerprint regression tests
+        run: cargo test --locked questions::tests -- --nocapture
+      - name: Deterministic unicast discovery regression tests
+        run: cargo test --locked room::discovery::tests -- --nocapture
+      - name: TCP endpoint correction regression tests
+        run: cargo test --locked room::service::tests::endpoint_ -- --nocapture
+      - name: Portable and deterministic socket tests (skip only legacy LAN suite)
         run: cargo test --locked -- --skip room::network_tests
       - name: LAN integration tests (explicitly skipped in CI)
         run: |

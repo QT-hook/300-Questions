@@ -5,7 +5,6 @@ use super::{
     storage,
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     net::{SocketAddr, TcpListener, TcpStream, UdpSocket},
@@ -52,11 +51,14 @@ pub enum Event {
     State(Box<Room>),
     Status(String),
     Error(String),
+    Diagnostics(Vec<String>),
     Left,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Packet {
     version: u32,
+    #[serde(default = "unknown_version")]
+    app_version: String,
     fingerprint: String,
     sender: Member,
     room_id: Option<String>,
@@ -71,12 +73,12 @@ struct Reply {
 }
 struct Shared {
     room: Mutex<Option<Room>>,
+    endpoint: Mutex<String>,
     stop: AtomicBool,
     connections: AtomicUsize,
 }
 pub struct Service {
     id: String,
-    endpoint: String,
     commands: SyncSender<Command>,
     events: Mutex<Receiver<Event>>,
     shared: Arc<Shared>,
@@ -90,11 +92,25 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
 }
-fn fingerprint() -> String {
-    Sha256::digest(include_bytes!("../../assets/questions.json"))
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+fn unknown_version() -> String {
+    "0.1.0 (legacy)".into()
+}
+fn observed_endpoint(claimed: &str, peer: SocketAddr) -> Result<String, String> {
+    let address: SocketAddr = claimed.parse().map_err(|_| "非法监听地址".to_owned())?;
+    if address.port() == 0 || address.ip().is_unspecified() || address.ip().is_multicast() {
+        return Err("非法监听地址".into());
+    }
+    Ok(SocketAddr::new(peer.ip(), address.port()).to_string())
+}
+fn update_own_endpoint(own: &mut Member, stream: &TcpStream) -> Result<(), String> {
+    let local = stream.local_addr().map_err(|e| e.to_string())?;
+    own.endpoint = observed_endpoint(&own.endpoint, local)?;
+    Ok(())
+}
+fn correct_snapshot(room: &mut Room, member: &str, endpoint: &str) {
+    if let Some(m) = room.members.iter_mut().find(|m| m.id == member) {
+        m.endpoint = endpoint.into();
+    }
 }
 fn local_ip() -> String {
     UdpSocket::bind("0.0.0.0:0")
@@ -109,6 +125,7 @@ impl Service {
         Self::with_address("0.0.0.0:0", None)
     }
     fn with_address(bind: &str, path: Option<PathBuf>) -> Result<Self, String> {
+        crate::questions::embedded_fingerprint()?;
         let listener = TcpListener::bind(bind).map_err(|e| e.to_string())?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
@@ -132,6 +149,7 @@ impl Service {
         let (tx, events) = mpsc::sync_channel(128);
         let shared = Arc::new(Shared {
             room: Mutex::new(None),
+            endpoint: Mutex::new(endpoint.clone()),
             stop: AtomicBool::new(false),
             connections: AtomicUsize::new(0),
         });
@@ -154,7 +172,6 @@ impl Service {
         let worker = thread::spawn(move || run(listener, own, rx, tx, state, path));
         Ok(Self {
             id,
-            endpoint,
             commands,
             events: Mutex::new(events),
             shared,
@@ -184,7 +201,10 @@ impl Service {
         &self.id
     }
     pub fn endpoint(&self) -> String {
-        self.endpoint.clone()
+        self.shared
+            .endpoint
+            .lock()
+            .map_or_else(|_| "地址不可用".into(), |endpoint| endpoint.clone())
     }
     pub fn command(&self, c: Command) -> Result<(), String> {
         self.commands.try_send(c).map_err(|e| e.to_string())
@@ -233,11 +253,20 @@ fn run(
     path: PathBuf,
 ) {
     let (incoming_tx, incoming) = mpsc::sync_channel::<Packet>(128);
-    let hash = fingerprint();
-    let bank_len = crate::questions::embedded().map_or(0, |b| b.len());
+    let (hash, bank_len) = match crate::questions::embedded_fingerprint()
+        .and_then(|hash| crate::questions::embedded().map(|bank| (hash, bank.len())))
+    {
+        Ok(value) => value,
+        Err(error) => {
+            emit(&events, Event::Error(error));
+            return;
+        }
+    };
     let mut discovery = Discovery::new()
         .map_err(|e| emit(&events, Event::Error(format!("发现不可用，请手动 IP：{e}"))))
         .ok();
+    let mut discovery_retry = Instant::now();
+    let mut searching_since = None;
     let mut receipts = std::collections::BTreeSet::<String>::new();
     let mut room: Option<Room> = None;
     let mut pending = Vec::<Answer>::new();
@@ -250,8 +279,14 @@ fn run(
     while !shared.stop.load(Ordering::Relaxed) {
         handlers.retain(|handle: &JoinHandle<()>| !handle.is_finished());
         for _ in 0..32 {
-            let Ok((mut socket, _)) = listener.accept() else {
-                break;
+            let (mut socket, peer) = match listener.accept() {
+                Ok(value) => value,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    emit(&events, Event::Error(format!("TCP 监听失败：{error}")));
+                    break;
+                }
             };
             if shared.connections.fetch_add(1, Ordering::Relaxed) >= 32 {
                 shared.connections.fetch_sub(1, Ordering::Relaxed);
@@ -260,19 +295,25 @@ fn run(
             let shared = shared.clone();
             let tx = incoming_tx.clone();
             let hash = hash.clone();
+            let diagnostics = events.clone();
             handlers.push(thread::spawn(move || {
                 let _ = socket.set_read_timeout(Some(Duration::from_millis(1500)));
                 let _ = socket.set_write_timeout(Some(Duration::from_millis(200)));
+                let mut last_rejection = None;
                 while !shared.stop.load(Ordering::Relaxed) {
-                    let Ok(packet) = protocol::read_message::<Packet>(&mut socket) else {
+                    let Ok(mut packet) = protocol::read_message::<Packet>(&mut socket) else {
                         break;
                     };
-                    let error = if packet.version != protocol::VERSION || packet.fingerprint != hash
-                    {
-                        Some("协议版本或题库不一致".into())
+                    let error = if let Some(error) = protocol::compatibility_error(
+                        packet.version,
+                        &packet.app_version,
+                        &packet.fingerprint,
+                        &hash,
+                    ) {
+                        Some(error)
                     } else if packet.sender.name.trim().is_empty()
                         || packet.sender.name.chars().count() > 9
-                        || packet.sender.endpoint.parse::<SocketAddr>().is_err()
+                        || observed_endpoint(&packet.sender.endpoint, peer).is_err()
                         || packet.pending.len() > 300
                         || packet
                             .room
@@ -283,8 +324,23 @@ fn run(
                     } else {
                         None
                     };
-                    if error.is_none() && tx.try_send(packet).is_err() {
-                        break;
+                    if let Some(message) = &error
+                        && last_rejection
+                            .is_none_or(|at: Instant| at.elapsed() > Duration::from_secs(5))
+                    {
+                        emit(
+                            &diagnostics,
+                            Event::Error(format!("拒绝 {peer}：{message}")),
+                        );
+                        last_rejection = Some(Instant::now());
+                    }
+                    if error.is_none() {
+                        if let Ok(endpoint) = observed_endpoint(&packet.sender.endpoint, peer) {
+                            packet.sender.endpoint = endpoint;
+                        }
+                        if tx.try_send(packet).is_err() {
+                            break;
+                        }
                     }
                     let snapshot = shared.room.lock().ok().and_then(|r| r.clone());
                     if protocol::write_message(
@@ -316,11 +372,18 @@ fn run(
                         )?);
                         streams.clear();
                         seen.clear();
-                        emit(&events, Event::Status("房间已创建".into()));
+                        let message = if discovery.as_ref().is_none_or(|d| !d.responder_available())
+                        {
+                            "房间已创建，但 UDP 发现监听不可用；请让其他成员手动连接本机 TCP 地址"
+                        } else {
+                            "房间已创建"
+                        };
+                        emit(&events, Event::Status(message.into()));
                     }
                     Command::Discover { code: c } => {
                         code = c;
-                        if let Some(d) = &discovery {
+                        searching_since = Some(Instant::now());
+                        if let Some(d) = &mut discovery {
                             d.probe(&code);
                         }
                         emit(
@@ -336,10 +399,12 @@ fn run(
                         own.name = player.trim().into();
                         own.ready = false;
                         let mut s = connect(&endpoint)?;
+                        update_own_endpoint(&mut own, &s)?;
                         let reply = exchange(
                             &mut s,
                             &Packet {
                                 version: protocol::VERSION,
+                                app_version: env!("CARGO_PKG_VERSION").into(),
                                 fingerprint: hash.clone(),
                                 sender: own.clone(),
                                 room_id,
@@ -351,7 +416,10 @@ fn run(
                         if let Some(e) = reply.error {
                             return Err(e);
                         }
-                        let state = reply.room.ok_or("对方没有房间")?;
+                        let mut state = reply.room.ok_or("对方没有房间")?;
+                        let host = state.host.clone();
+                        correct_snapshot(&mut state, &host, &endpoint);
+                        correct_snapshot(&mut state, &own.id, &own.endpoint);
                         if state.fingerprint != hash {
                             return Err("题库不一致".into());
                         }
@@ -431,6 +499,7 @@ fn run(
                             }
                             let packet = Packet {
                                 version: protocol::VERSION,
+                                app_version: env!("CARGO_PKG_VERSION").into(),
                                 fingerprint: hash.clone(),
                                 sender: Member {
                                     online: false,
@@ -498,8 +567,9 @@ fn run(
             last = Instant::now();
             if let Some(r) = &mut room {
                 // Every member has a listener from service creation, so election endpoints never refer to ephemeral accepted ports.
-                let packet = Packet {
+                let mut packet = Packet {
                     version: protocol::VERSION,
+                    app_version: env!("CARGO_PKG_VERSION").into(),
                     fingerprint: hash.clone(),
                     sender: own.clone(),
                     room_id: Some(r.id.clone()),
@@ -519,16 +589,25 @@ fn run(
                     {
                         streams.insert(endpoint.clone(), s);
                     }
-                    let result = streams.get_mut(&endpoint).map(|s| exchange(s, &packet));
+                    let result = streams.get_mut(&endpoint).map(|s| {
+                        update_own_endpoint(&mut own, s)?;
+                        packet.sender = own.clone();
+                        if let Some(snapshot) = &mut packet.room {
+                            correct_snapshot(snapshot, &own.id, &own.endpoint);
+                        }
+                        exchange(s, &packet)
+                    });
                     match result {
                         Some(Ok(reply)) => {
-                            seen.insert(member, Instant::now());
+                            seen.insert(member.clone(), Instant::now());
                             if let Some(e) = reply.error {
                                 emit(&events, Event::Error(e));
-                            } else if let Some(other) = reply.room
+                            } else if let Some(mut other) = reply.room
                                 && other.fingerprint == hash
                                 && other.validate(bank_len).is_ok()
                             {
+                                correct_snapshot(&mut other, &member, &endpoint);
+                                correct_snapshot(&mut other, &own.id, &own.endpoint);
                                 for a in &other.answers {
                                     receipts.insert(a.submission.clone());
                                 }
@@ -544,6 +623,7 @@ fn run(
                     if m.id == own.id {
                         m.online = true;
                         m.ready = own.ready;
+                        m.endpoint = own.endpoint.clone();
                     } else {
                         m.online = seen
                             .get(&m.id)
@@ -570,6 +650,24 @@ fn run(
                 }
                 pending.retain(|a| !receipts.contains(&a.submission) && a.member == own.id);
             }
+            if discovery.is_none() && discovery_retry.elapsed() > Duration::from_secs(5) {
+                discovery_retry = Instant::now();
+                discovery = Discovery::new()
+                    .map_err(|error| {
+                        emit(
+                            &events,
+                            Event::Error(format!("发现初始化失败（将重试）：{error}")),
+                        )
+                    })
+                    .ok();
+            }
+            let mut diagnostics = vec![format!(
+                "本机 v{} · 协议 {} · 题库 {} · TCP监听 {}",
+                env!("CARGO_PKG_VERSION"),
+                protocol::VERSION,
+                protocol::short_hash(&hash),
+                own.endpoint
+            )];
             if let Some(d) = &mut discovery {
                 let advert = room.as_ref().filter(|r| r.host == own.id).map(|r| Advert {
                     room_id: r.id.clone(),
@@ -582,7 +680,23 @@ fn run(
                 d.poll(advert.as_ref());
                 d.probe(&code);
                 emit(&events, Event::Rooms(d.rooms(&code)));
+                diagnostics.extend(d.diagnostics());
+                if searching_since.is_some_and(|at| at.elapsed() > Duration::from_secs(3)) {
+                    if d.rooms(&code).is_empty() {
+                        emit(
+                            &events,
+                            Event::Status("未找到房间；请检查网络诊断或手动 IP:端口连接".into()),
+                        );
+                    }
+                    searching_since = None;
+                }
+            } else {
+                diagnostics.push("发现初始化不可用，将重试；仍可手动 TCP 连接".into());
             }
+            emit(&events, Event::Diagnostics(diagnostics));
+        }
+        if let Ok(mut endpoint) = shared.endpoint.lock() {
+            *endpoint = own.endpoint.clone();
         }
         if room != published {
             if let Some(r) = &room {
@@ -601,5 +715,60 @@ fn run(
     streams.clear();
     for handler in handlers {
         let _ = handler.join();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn endpoint_observed_peer_preserves_claimed_listener_port() {
+        assert_eq!(
+            observed_endpoint("10.9.0.1:42740", "192.168.4.2:59876".parse().unwrap()).unwrap(),
+            "192.168.4.2:42740"
+        );
+    }
+
+    #[test]
+    fn endpoint_rejects_malformed_and_invalid_listener() {
+        for claimed in ["bad", "127.0.0.1:0", "0.0.0.0:123", "239.1.1.1:123"] {
+            assert!(observed_endpoint(claimed, "127.0.0.1:55555".parse().unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn endpoint_outgoing_uses_connection_local_ip_not_source_port() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (_accepted, _) = listener.accept().unwrap();
+        let mut own = Member {
+            id: "own".into(),
+            name: "me".into(),
+            endpoint: "10.9.0.1:12345".into(),
+            online: true,
+            ready: false,
+        };
+        update_own_endpoint(&mut own, &stream).unwrap();
+        assert_eq!(own.endpoint, "127.0.0.1:12345");
+        let mut room = Room::new("test".into(), "1234".into(), own.clone(), "hash".into()).unwrap();
+        correct_snapshot(&mut room, &own.id, "127.0.0.1:23456");
+        assert_eq!(room.members[0].endpoint, "127.0.0.1:23456");
+    }
+
+    #[test]
+    fn compatibility_distinguishes_protocol_and_bank() {
+        let protocol = protocol::compatibility_error(1, "0.1.0", "old", "new").unwrap();
+        assert!(
+            protocol.contains("协议版本不一致")
+                && protocol.contains("0.1.0")
+                && protocol.contains("new")
+        );
+        let bank = protocol::compatibility_error(2, "0.1.1", "old", "new").unwrap();
+        assert!(bank.contains("题库指纹不一致"));
+        assert_eq!(
+            protocol::compatibility_error(2, "0.1.1", "same", "same"),
+            None
+        );
     }
 }

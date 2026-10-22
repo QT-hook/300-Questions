@@ -1,6 +1,6 @@
 [package]
 name = "dioxus-app"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 publish = false
 
@@ -11,6 +11,7 @@ serde_json = "1.0.154"
 rand = "0.9.5"
 socket2 = { version = "0.6.4", features = ["all"] }
 sha2 = "0.10.9"
+if-addrs = "0.15"
 tokio = { version = "1.54.1", features = ["time"] }
 
 [lints.rust]
