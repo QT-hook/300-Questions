@@ -1,0 +1,151 @@
+name: Release Windows and Linux x64
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Portable unit tests
+        run: cargo test --locked -- --skip room::network_tests
+      - name: LAN integration tests (explicitly skipped in CI)
+        run: Write-Output 'SKIPPED room::network_tests (real sockets, discovery and timing). Run cargo test --locked room::network_tests -- --test-threads=1 on a suitable local network; CI is not GUI or cross-device acceptance.'
+      - name: Build Windows x64 release
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+      - name: Package Windows
+        run: ./scripts/package-windows.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-x64
+          path: |
+            dist/300-Questions-windows-x64.zip
+            dist/300-Questions-windows-x64.zip.sha256
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Portable unit tests
+        run: cargo test --locked -- --skip room::network_tests
+      - name: LAN integration tests (explicitly skipped in CI)
+        run: printf '%s\n' 'SKIPPED room::network_tests (real sockets, discovery and timing). Run cargo test --locked room::network_tests -- --test-threads=1 on a suitable local network; CI is not GUI or cross-device acceptance.'
+      - name: Build Linux x64 release
+        run: cargo build --release --locked --target x86_64-unknown-linux-gnu
+      - name: Package Linux
+        run: bash scripts/package-linux.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-x64
+          path: |
+            dist/300-Questions-linux-x64.tar.gz
+            dist/300-Questions-linux-x64.tar.gz.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: [windows, linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-windows-x64
+          path: release-assets
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-linux-x64
+          path: release-assets
+      - name: Validate exactly four assets and both archive checksums
+        shell: python
+        run: |
+          from pathlib import Path
+          import hashlib
+          import re
+          root = Path('release-assets')
+          archives = ['300-Questions-windows-x64.zip', '300-Questions-linux-x64.tar.gz']
+          expected = set(archives + [name + '.sha256' for name in archives])
+          if {p.name for p in root.iterdir()} != expected:
+              raise SystemExit('Expected exactly two archives and their two checksum files')
+          for name in sorted(expected):
+              path = root / name
+              if path.is_symlink() or not path.is_file() or path.stat().st_size == 0:
+                  raise SystemExit(f'Invalid or empty asset: {name}')
+          for name in archives:
+              text = (root / (name + '.sha256')).read_text(encoding='ascii').strip()
+              match = re.fullmatch(r'([0-9a-fA-F]{64})  ' + re.escape(name), text)
+              if not match:
+                  raise SystemExit(f'Invalid checksum format: {name}')
+              with (root / name).open('rb') as archive:
+                  actual = hashlib.file_digest(archive, 'sha256').hexdigest()
+              if actual != match[1].lower():
+                  raise SystemExit(f'Checksum mismatch: {name}')
+              print(f'Verified {name}: {actual}')
+      - name: Create draft, upload all assets, then publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Ref data is passed through env, never interpolated into shell source.
+          [[ "$RELEASE_TAG" == v* ]] || { printf '%s\n' 'Not a release tag' >&2; exit 1; }
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            printf '%s\n' 'Release already exists (including drafts); refusing to overwrite.' >&2
+            exit 1
+          fi
+          cat > release-notes.txt <<'NOTES'
+          ## Windows / Linux x64 下载
+          - Windows：完整解压 ZIP 后运行 dioxus-app.exe；需要 Microsoft Edge WebView2 Evergreen Runtime x64，缺少 VCRUNTIME/MSVCP 时安装 Visual C++ Redistributable x64。
+          - Linux：Ubuntu 24.04 x86_64 / glibc 2.39 构建基线，需兼容的 GTK 3、WebKitGTK 4.1、libxdo、OpenSSL、Ayatana AppIndicator、librsvg 运行库及图形桌面；不是自包含包或 AppImage。外部链接需要 xdg-utils，中文字体建议 fonts-noto-cjk。详见包内中文运行说明。
+          - 两个平台均内嵌题库和样式。请先核对压缩包旁的 SHA-256，再解压并核对包内 SHA256SUMS.txt；校验和不等于发布者签名。程序未签名，系统可能提示未知发布者，不要关闭系统安全保护。
+          - 局域网功能仅用于可信网络，无 TLS 或身份认证；需要 TCP 入站与 UDP 42739，程序不会自动修改防火墙。
+          - CI 仅验证格式、可移植测试与构建。真实套接字/发现/时序相关 room::network_tests 在 CI 明确跳过；GUI、动画、系统浏览器打开链接和跨机器局域网尚需实机验收。
+          NOTES
+          gh release create "$RELEASE_TAG" --verify-tag --draft --title "$RELEASE_TAG" --notes-file release-notes.txt
+          gh release upload "$RELEASE_TAG" \
+            release-assets/300-Questions-windows-x64.zip \
+            release-assets/300-Questions-windows-x64.zip.sha256 \
+            release-assets/300-Questions-linux-x64.tar.gz \
+            release-assets/300-Questions-linux-x64.tar.gz.sha256
+          gh release edit "$RELEASE_TAG" --draft=false

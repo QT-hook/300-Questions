@@ -19,15 +19,28 @@ button { font: inherit; -webkit-tap-highlight-color: transparent; }
     --error: #b53640;
     color-scheme: light;
     position: relative;
-    display: grid;
-    justify-items: center;
-    align-items: start;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
     min-height: 100vh;
-    padding: clamp(88px, 20vh, 180px) 32px 88px;
+    padding: clamp(88px, 20vh, 180px) 32px 24px;
     background: var(--background);
     color: var(--text);
     transition: background-color 180ms ease, color 180ms ease;
 }
+
+.app-content {
+    flex: 1 0 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    min-width: 0;
+}
+.app-footer { flex: none; margin-top: 48px; text-align: center; font-size: 12px; line-height: 1.8; }
+.app-footer a { color: var(--muted); text-underline-offset: 3px; overflow-wrap: anywhere; }
+.app-footer a:hover { color: var(--text); }
+.app-footer a:focus-visible { outline: 2px solid var(--focus); outline-offset: 5px; border-radius: 2px; }
 
 .app[data-theme="dark"] {
     --background: #17191e;

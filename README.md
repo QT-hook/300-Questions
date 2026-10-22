@@ -64,9 +64,36 @@ cargo clippy --offline --locked --all-targets --all-features -- -D warnings
 
 单测覆盖原有 8 项主页输入/面板验证，以及严格题库解析、300 条题库和重复题保留、固定范围首尾/单题/非法范围、随机数量和无重复、重复点击只计分一次、旧会话/旧题序/错误阶段拒绝推进、最后一题结果、全对/全错与 1/3 = 33.3%。构建与单测不等于 GUI 端到端验证；本次未进行交互式目视验证，真实窗口下的计时、动画、焦点、窄窗口、长内容、主题切换与系统减少动态效果仍需人工验收。
 
-## Windows x64 发行构建与下载
+## Windows / Linux x64 发行下载
 
-当前已配置构建流程，**本次本地实现尚未在 Windows 上构建或运行**。只有 GitHub Actions 对应提交的任务成功后，才会有该提交的 Windows 产物；不能把流程配置或 Linux 测试通过当作 exe 已可运行。
+从 [GitHub Releases](https://github.com/QT-hook/300-Questions/releases) 选择已发布版本，下载对应平台压缩包和同名 `.sha256`。只有双平台构建、打包、校验和上传全部成功，Release 才从草稿转为公开；工作流配置本身不代表已有公开产物。
+
+- Windows：`300-Questions-windows-x64.zip` 和 `.zip.sha256`。先用 PowerShell `Get-FileHash .\300-Questions-windows-x64.zip -Algorithm SHA256` 核对，再完整解压 ZIP，运行 `dioxus-app.exe`。需要 [Microsoft Edge WebView2 Evergreen Runtime x64](https://developer.microsoft.com/microsoft-edge/webview2/)；缺少 VCRUNTIME/MSVCP 时安装 [Visual C++ Redistributable x64](https://aka.ms/vs/17/release/vc_redist.x64.exe)。发行版不弹出控制台。
+- Linux：`300-Questions-linux-x64.tar.gz` 和 `.tar.gz.sha256`。在下载目录执行 `sha256sum -c 300-Questions-linux-x64.tar.gz.sha256`，再 `tar -xzf 300-Questions-linux-x64.tar.gz`，在解压目录运行 `./dioxus-app`。构建基线是 **Ubuntu 24.04 x86_64 / glibc 2.39**，不是自包含包、AppImage 或全发行版通用程序；旧 glibc 不保证兼容，需要有效的 X11/Wayland 图形桌面和兼容原生运行库。Ubuntu 24.04 可安装：
+
+  ```bash
+  sudo apt update
+  sudo apt install libgtk-3-0t64 libwebkit2gtk-4.1-0 libjavascriptcoregtk-4.1-0 libxdo3 libssl3t64 libayatana-appindicator3-1 librsvg2-2 xdg-utils fonts-noto-cjk
+  ```
+
+  `xdg-utils` 用于系统浏览器打开 GitHub 页脚；中文显示方框时安装 `fonts-noto-cjk` 等 CJK 字体。其他发行版自行确认库名和 ABI 兼容性。
+- 两种包均只含程序、中文 `运行说明.txt` 与二进制 `SHA256SUMS.txt`，不含源码、Excel、缓存或外置题库/样式。Linux 解压后可用 `sha256sum -c SHA256SUMS.txt` 校验，Windows 用 `Get-FileHash` 对照。校验和不是数字签名；程序未签名，SmartScreen 等可能提示未知发布者，仅在确认来源后决定运行，不要关闭安全保护。
+- 单人练习无需联网。局域网只用于可信网络，无 TLS 或身份认证；需允许程序 TCP 入站和 UDP 42739，不自动修改防火墙。CI 不代表 GUI、动画、WebView2、系统浏览器链接或跨设备局域网已验收，仍须实机验证。
+- 所有界面底部共用 GitHub 链接，自然布局推底不覆盖内容；保留主题、表单和动画，链接通过系统浏览器打开。
+
+### 发布流程
+
+`.github/workflows/release.yml` 仅由 `v*` 标签 push 或 `workflow_dispatch` 触发。手动选择分支仅构建、不发布；只有 `refs/tags/v*` 才运行发布 job。发布前由维护者检查版本与标签不存在，再将新标签推送到已确认的提交（例如 `v0.1.0`），不要 force 或复用标签。
+
+两个 build job 仅有 `contents: read`：Windows 稳定 Rust / MSVC x64 复用 `scripts/package-windows.ps1`；Linux 固定 `ubuntu-24.04`、安装原生开发库，构建 `x86_64-unknown-linux-gnu`，调用 `scripts/package-linux.sh`。均先 fmt 和 locked 可移植测试，再 locked release 构建，各上传精确命名的 artifact。
+
+发布 job 等两平台成功才执行，独有 `contents: write`，使用内置 `secrets.GITHUB_TOKEN`，无需另设 PAT。只下载本次运行的两个指定 artifact，严格检查两个包及两个校验文件（总计四个非空文件），验证 SHA-256 后创建 **draft**，全部上传成功才公开。按标签串行，不覆盖已存在的 Release（包括 draft），不用 `--clobber`；上传失败保留草稿供维护者检查，不自动删除或重建已有发行版。
+
+CI 明确跳过真实套接字/发现/时序相关 `room::network_tests`，可移植测试失败会使流程失败。适合的本地网络上执行 `cargo test --locked room::network_tests -- --test-threads=1`。`target/` 和 `dist/` 保持忽略。
+
+### Windows 单平台开发构建（保留原流程）
+
+保留 `.github/workflows/windows-build.yml` 作为分支构建入口；它上传 Actions artifact，不负责公共 Release。公共双平台发行请使用上面的 release workflow。
 
 - `.github/workflows/windows-build.yml` 在任意分支 push 时触发，也支持 Actions 页面 `Windows x64 build` → `Run workflow`（手动入口是否可见取决于默认分支上是否已有此 workflow）。使用 `windows-latest`、稳定 Rust 和 `x86_64-pc-windows-msvc`，先检查格式和可移植测试，再执行 locked release 构建。
 - 成功后在该次运行的 **Artifacts** 下载 `300-Questions-windows-x64`（GitHub 可能要求登录）。解压 GitHub 的 artifact 外层包，得到 `300-Questions-windows-x64.zip` 与 `.zip.sha256`；用 `Get-FileHash .\300-Questions-windows-x64.zip -Algorithm SHA256` 核对 ZIP，再完整解压内层 ZIP。内含 `dioxus-app.exe`、中文 `运行说明.txt` 和 exe 的 `SHA256SUMS.txt`。校验和不等于数字签名。
@@ -96,4 +123,17 @@ cargo build --release --locked --target x86_64-pc-windows-msvc
 - `assets/questions.json`：仅题干、四选项、答案。
 - `scripts/extract_questions.py`：只读 XLSX 提取与可选完整 Markdown 审计比较。
 
-开发版程序在 `target/debug/dioxus-app`；发行版可用 `cargo build --release --locked` 构建。这不是独立安装包，仍依赖平台 WebView 与原生库。Linux 需要 GTK 3、WebKitGTK 4.1、libxdo、OpenSSL 等开发/运行库，以及有效 X11/Wayland 图形会话；无图形环境仅能构建和运行纯逻辑测试。当前配置了 Windows x64 便携 ZIP（不是安装程序），未配置 Web、移动端、热重载或安装器。
+开发版程序在 `target/debug/dioxus-app`；发行版可用 `cargo build --release --locked` 构建。这不是独立安装包，仍依赖平台 WebView 与原生库。Linux 需要 GTK 3、WebKitGTK 4.1、libxdo、OpenSSL 等开发/运行库，以及有效 X11/Wayland 图形会话；无图形环境仅能构建和运行纯逻辑测试。当前配置了 Windows x64 ZIP 和 Ubuntu 24.04 基线 Linux x64 tar.gz（均不是安装程序或自包含包），未配置 Web、移动端、热重载或安装器。
+
+Linux 开发机准备开发库后可执行：
+
+```bash
+sudo apt-get install -y build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+rustup target add x86_64-unknown-linux-gnu
+cargo fmt --check
+cargo test --locked -- --skip room::network_tests
+cargo build --release --locked --target x86_64-unknown-linux-gnu
+bash scripts/package-linux.sh
+```
+
+Linux 脚本仅从指定 target 目录读取非空可执行文件，输出 `dist/300-Questions-linux-x64.tar.gz` 及外部 `.sha256`；包内二进制权限为 755，并包含运行说明和 SHA256SUMS.txt。

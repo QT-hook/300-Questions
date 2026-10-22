@@ -323,6 +323,7 @@ fn App() -> Element {
                     }
                 }
             }
+            div { class: "app-content",
             if let Err(error) = &service { p { class: "field-error network-status", role: "alert", "网络服务不可用：{error}" } }
             if !status().is_empty() { p { class: "network-status", role: "status", aria_live: "polite", "{status}" } }
             if let Some(message) = network_error() { p { class: "field-error network-status", role: "alert", "{message}" } }
@@ -512,6 +513,15 @@ fn App() -> Element {
                     }
                 }
             }
+            }
+            }
+            footer { class: "app-footer",
+                a {
+                    href: "https://github.com/QT-hook/300-Questions",
+                    target: "_blank",
+                    rel: "noopener noreferrer",
+                    "GitHub · QT-hook/300-Questions"
+                }
             }
         }
     }
